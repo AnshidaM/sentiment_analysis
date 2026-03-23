@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+scikit-learn
+pandas
+numpy
+nltk
+joblib
+python-multipart
+transformers
+torch
+emoji

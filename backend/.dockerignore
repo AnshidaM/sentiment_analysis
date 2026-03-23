@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+Training.ipynb
+DATA
+TEST
