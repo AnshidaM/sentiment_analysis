@@ -1,25 +1,25 @@
 # ================================
 # IMPORTS
 # ================================
-
-import nltk
-
-nltk.download('punkt')
-nltk.download('stopwords')
-nltk.download('wordnet')
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 import joblib
 import re
 import emoji
+import nltk
 
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 
 from fastapi.middleware.cors import CORSMiddleware
-from transformers import pipeline
+
+# ================================
+# NLTK (keep for local, move to Docker later)
+# ================================
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
 
 # ================================
 # APP INIT
@@ -47,18 +47,30 @@ vectorizer = data["vectorizer"]
 stop_words = set(stopwords.words("english"))
 lemmatizer = WordNetLemmatizer()
 
-neutral_words = ["okay", "fine", "average", "normal", "not bad", "not great"]
-
-def boost_neutral(text):
-    for word in neutral_words:
-        if re.search(rf"\b{word}\b", text):
-            return text + " neutral"
+# ================================
+# PREPROCESSING (MATCH TRAINING)
+# ================================
+def normalize_contractions(text):
+    text = re.sub(r"n\'t", " not", text)
+    text = re.sub(r"\'re", " are", text)
+    text = re.sub(r"\'s", " is", text)
+    text = re.sub(r"\'ll", " will", text)
+    text = re.sub(r"\'ve", " have", text)
+    text = re.sub(r"\'m", " am", text)
     return text
 
+
+
+def enrich_with_emoji(text):
+    em = emoji.demojize(text)
+    em = em.replace(":", " ")
+    return text + " " + em + " " + em   # 👈 double boost
+
 def preprocess(text):
-    text = boost_neutral(text)
+    text = normalize_contractions(text)   # 👈 add this
+    text = enrich_with_emoji(text)
     text = text.lower()
-    text = re.sub(r"[^a-zA-Z\s]", "", text)
+    text = re.sub(r'[^a-zA-Z\s!?]', '', text)
 
     tokens = word_tokenize(text)
     tokens = [w for w in tokens if w not in stop_words]
@@ -66,24 +78,22 @@ def preprocess(text):
 
     return " ".join(tokens)
 # ================================
-# EMOJI MODEL
+# CONTEXT RULE (IMPORTANT)
 # ================================
-transformer_model = None
+def context_override(text, prediction):
+    text_lower = text.lower()
 
-def get_transformer():
-    global transformer_model
-    if transformer_model is None:
-        from transformers import pipeline
-        transformer_model = pipeline(
-            "sentiment-analysis",
-            model="distilbert-base-uncased-finetuned-sst-2-english"
-        )
-    return transformer_model
+    if "not good" in text_lower or "not great" in text_lower:
+        return "negative"
 
+    if "but" in text_lower:
+        parts = text_lower.split("but")
+        if len(parts) > 1:
+            return model.predict(
+                vectorizer.transform([preprocess(parts[-1])])
+            )[0]
 
-
-def contains_emoji(text):
-    return any(char in emoji.EMOJI_DATA for char in text)
+    return prediction
 
 # ================================
 # REQUEST SCHEMA
@@ -106,19 +116,9 @@ def predict(data: TextInput):
     if not text_input.strip():
         return {"sentiment": "neutral"}
 
-    # emoji → transformer
-    if contains_emoji(text_input):
-        result = transformer_model(text_input)[0]
-        label = result["label"].lower()
-
-        if "pos" in label:
-            return {"sentiment": "positive"}
-        elif "neg" in label:
-            return {"sentiment": "negative"}
-        else:
-            return {"sentiment": "neutral"}
-
-    # SVM model
+    # ================================
+    # SVM MODEL (PRIMARY)
+    # ================================
     processed = preprocess(text_input)
     text_vec = vectorizer.transform([processed])
 
@@ -127,4 +127,7 @@ def predict(data: TextInput):
 
     prediction = model.predict(text_vec)[0]
 
-    return {"sentiment": prediction}
+    # apply context rule
+    final_pred = context_override(text_input, prediction)
+
+    return {"sentiment": final_pred}
